@@ -1,0 +1,15 @@
+bin/
+obj/
+test-bin/
+Data/
+DemoData/
+http-test-data-*/
+preview-data/
+release-preview/
+*.log
+*.bak
+*.tmp
+devices.json
+alerts.json
+.vs/
+*.user
