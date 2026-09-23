@@ -23,7 +23,7 @@ namespace NetWatch {
    }
    if(start) timer=new System.Threading.Timer(Tick,null,700,1000);
   }
-  static object Summary(Snapshot s) {return new {s.Id,s.Time,s.Status,s.Snmp,s.Rtt,s.Loss,s.InBps,s.OutBps,s.MaxUtilization,PortCount=s.Interfaces.Count,UpPorts=s.Interfaces.Count(p=>p.Oper==1)};}
+  static object Summary(Snapshot s) {return new {s.Id,s.Time,s.Status,s.Snmp,s.Rtt,s.Loss,s.InBps,s.OutBps,s.Cpu,s.Memory,s.MaxUtilization,PortCount=s.Interfaces.Count,UpPorts=s.Interfaces.Count(p=>p.Oper==1)};}
   public object Dashboard() {lock(gate) {return new {Now=Clock.Now(),Warning=StorageWarning,Devices=devices.Select(d=>new {Config=d.Public(),Current=current.ContainsKey(d.Id)?Summary(current[d.Id]):null,Polling=busy.Contains(d.Id),Next=next.ContainsKey(d.Id)?next[d.Id]:0}).ToList(),Alerts=alerts.OrderByDescending(a=>a.Time).Take(250).ToList(),ActiveAlerts=alerts.Count(a=>!a.Resolved.HasValue),DataDirectory=store.Root};}}
   public object Detail(string id) {lock(gate) {var d=Find(id);return new {Config=d.Public(),Current=current.ContainsKey(id)?current[id]:null,History=histories.ContainsKey(id)?histories[id].ToArray():new Sample[0]};}}
   public List<Sample> History(string id) {lock(gate) {Find(id);return histories.ContainsKey(id)?histories[id].ToList():new List<Sample>();}}

@@ -90,7 +90,10 @@ namespace NetWatch {
       s.Interfaces.Add(p);
      }
     } catch(Exception ex) {s.Error="端口采集未完成："+Friendly(ex);}
-    s.Cpu=Metric(session,d.CpuOid);s.Memory=Metric(session,d.MemoryOid);
+    // A blank OID uses the H3C ENTITY-EXT-MIB table automatically. This
+    // avoids asking users to discover the physical entity index by hand.
+    s.Cpu=string.IsNullOrEmpty(d.CpuOid)?AutoMetric(session,"1.3.6.1.4.1.25506.2.6.1.1.1.1.6"):Metric(session,d.CpuOid);
+    s.Memory=string.IsNullOrEmpty(d.MemoryOid)?AutoMetric(session,"1.3.6.1.4.1.25506.2.6.1.1.1.1.8"):Metric(session,d.MemoryOid);
     if((!string.IsNullOrEmpty(d.CpuOid)&&!s.Cpu.HasValue)||(!string.IsNullOrEmpty(d.MemoryOid)&&!s.Memory.HasValue)) s.Error=(s.Error??"")+" CPU/内存 OID 不可读或返回值不在 0–100 之间。";
    } catch(Exception ex) {s.Status=received>0?"degraded":"offline";s.Error=Friendly(ex);}
    Summarize(s);return s;
@@ -98,6 +101,13 @@ namespace NetWatch {
   static double? Metric(SnmpSession session,string oid) {
    if(string.IsNullOrWhiteSpace(oid)) return null;
    try {var v=session.Get(oid).Values.FirstOrDefault();double n;return SnmpSession.Valid(v)&&double.TryParse(v.ToString(),out n)&&n>=0&&n<=100?(double?)n:null;} catch{return null;}
+  }
+  static double? AutoMetric(SnmpSession session,string column) {
+   try {
+    var values=session.Walk(column,64).Values;
+    foreach(var v in values) { double n; if(SnmpSession.Valid(v)&&double.TryParse(v.ToString(),out n)&&n>=0&&n<=100)return n; }
+   } catch {}
+   return null;
   }
   static string Friendly(Exception ex) {
    if(ex is System.Security.Cryptography.CryptographicException) return "社区字符串无法解密，请在当前 Windows 用户下重新填写";
