@@ -62,9 +62,9 @@ namespace NetWatch {
    s.Rtt=received>0?(double?)rtt/received:null; s.Loss=(3-received)*100.0/3;
    try {
     var session=new SnmpSession(d);
-    var sys=session.Get(Sys+"1.0",Sys+"3.0",Sys+"5.0");
+    var sys=session.Get(Sys+"1.0",Sys+"2.0",Sys+"3.0",Sys+"5.0");
     if(sys.Values.All(v=>!SnmpSession.Valid(v))) throw new InvalidOperationException("SNMP 系统信息不可读，请检查只读视图权限");
-    s.Snmp=true; s.Status="online"; s.SysName=Str(sys,Sys+"5.0");s.Description=Str(sys,Sys+"1.0");s.UptimeTicks=Num(sys,Sys+"3.0");
+    s.Snmp=true; s.Status="online"; s.SysName=Str(sys,Sys+"5.0");s.SysObjectId=Str(sys,Sys+"2.0");s.Description=Str(sys,Sys+"1.0");s.UptimeTicks=Num(sys,Sys+"3.0");
     try {
      var table=session.Walk("1.3.6.1.2.1.2.2",512*23+1);
      Dictionary<string,ISnmpData> ext;
@@ -90,11 +90,25 @@ namespace NetWatch {
       s.Interfaces.Add(p);
      }
     } catch(Exception ex) {s.Error="端口采集未完成："+Friendly(ex);}
-    // A blank OID uses the H3C ENTITY-EXT-MIB table automatically. This
-    // avoids asking users to discover the physical entity index by hand.
-    s.Cpu=string.IsNullOrEmpty(d.CpuOid)?AutoMetric(session,"1.3.6.1.4.1.25506.2.6.1.1.1.1.6"):Metric(session,d.CpuOid);
-    s.Memory=string.IsNullOrEmpty(d.MemoryOid)?AutoMetric(session,"1.3.6.1.4.1.25506.2.6.1.1.1.1.8"):Metric(session,d.MemoryOid);
-    if((!string.IsNullOrEmpty(d.CpuOid)&&!s.Cpu.HasValue)||(!string.IsNullOrEmpty(d.MemoryOid)&&!s.Memory.HasValue)) s.Error=(s.Error??"")+" CPU/内存 OID 不可读或返回值不在 0–100 之间。";
+    // CPU/memory are selected automatically. H3C and Huawei entity MIBs are
+    // checked first, then standard HOST-RESOURCES-MIB. OIDs remain an internal
+    // compatibility fallback for configurations created by older versions.
+    var h3c=H3cMetrics(session);
+    var huawei=IsHuawei(s)?HuaweiMetrics(session):new H3cResult();
+    var vendorCpu=huawei.Cpu??h3c.Cpu;
+    s.Cpu=vendorCpu??StandardCpu(session)??Metric(session,d.CpuOid);
+    s.Cpu1Min=huawei.Cpu1Min??h3c.Cpu1Min;
+    s.Cpu5Min=huawei.Cpu5Min??h3c.Cpu5Min;
+    if(s.Cpu5Min.HasValue)s.Cpu5MinSource="设备 SNMP";
+    var standardMemory=StandardMemory(session);
+    if(standardMemory.HasValue) {s.Memory=standardMemory;s.MemorySource="HOST-RESOURCES-MIB 系统 RAM";}
+    else if(huawei.Memory.HasValue) {s.Memory=huawei.Memory;s.MemorySource="华为 HUAWEI-ENTITY-EXTENT-MIB 实体";}
+    else if(h3c.Memory.HasValue) {s.Memory=h3c.Memory;s.MemorySource="H3C ENTITY-EXT-MIB 实体";}
+    else {s.Memory=Metric(session,d.MemoryOid);if(s.Memory.HasValue)s.MemorySource="旧版兼容 OID";}
+    s.MetricEntity=huawei.Entity??h3c.Entity;
+    if(s.Cpu.HasValue) s.CpuTime=s.Time;
+    if(s.Memory.HasValue) s.MemoryTime=s.Time;
+    if(!s.Cpu.HasValue||!s.Memory.HasValue) s.Error=(s.Error??"")+" CPU/内存未读取：请确认设备 SNMP 只读视图允许 H3C ENTITY-EXT-MIB、华为 HUAWEI-ENTITY-EXTENT-MIB、ENTITY-MIB 或 HOST-RESOURCES-MIB。";
    } catch(Exception ex) {s.Status=received>0?"degraded":"offline";s.Error=Friendly(ex);}
    Summarize(s);return s;
   }
@@ -102,10 +116,70 @@ namespace NetWatch {
    if(string.IsNullOrWhiteSpace(oid)) return null;
    try {var v=session.Get(oid).Values.FirstOrDefault();double n;return SnmpSession.Valid(v)&&double.TryParse(v.ToString(),out n)&&n>=0&&n<=100?(double?)n:null;} catch{return null;}
   }
-  static double? AutoMetric(SnmpSession session,string column) {
+  class H3cResult {public double? Cpu,Cpu1Min,Cpu5Min,Memory;public string Entity;}
+  static Dictionary<int,double> PercentColumn(SnmpSession session,string column) {
+   var result=new Dictionary<int,double>();
+   try {foreach(var pair in session.Walk(column,512)) {double n;int index;if(SnmpSession.Valid(pair.Value)&&double.TryParse(pair.Value.ToString(),out n)&&n>=0&&n<=100&&TryIndex(pair.Key,column,out index))result[index]=n;}} catch {}
+   return result;
+  }
+  static Dictionary<int,int> IntegerColumn(SnmpSession session,string column) {
+   var result=new Dictionary<int,int>();
+   try {foreach(var pair in session.Walk(column,512)) {ulong? n=SnmpSession.Number(pair.Value);int index;if(n.HasValue&&n.Value<=Int32.MaxValue&&TryIndex(pair.Key,column,out index))result[index]=(int)n.Value;}} catch {}
+   return result;
+  }
+  static bool TryIndex(string oid,string column,out int index) {index=0;if(!oid.StartsWith(column+".",StringComparison.Ordinal))return false;return Int32.TryParse(oid.Substring(column.Length+1),out index);}
+  static H3cResult H3cMetrics(SnmpSession session) {
+   const string root="1.3.6.1.4.1.25506.2.6.1.1.1.1", cpu=root+".6", memory=root+".8";
+   var result=new H3cResult();var cpus=PercentColumn(session,cpu);var memories=PercentColumn(session,memory);
+   var indexes=cpus.Keys.Concat(memories.Keys).Distinct().OrderBy(x=>x).ToList();if(indexes.Count==0)return result;
+   Dictionary<int,int> classes=new Dictionary<int,int>();
+   if(indexes.Count>1) classes=IntegerColumn(session,"1.3.6.1.2.1.47.1.1.1.1.5");
+   Func<int,double> score=index=>{
+    double value=0;int n;
+    if(classes.TryGetValue(index,out n)&&n==12)value+=500;
+    if(cpus.ContainsKey(index))value+=50;
+    if((cpus.ContainsKey(index)&&cpus[index]>0)||(memories.ContainsKey(index)&&memories[index]>0))value+=10;
+    value-=index/1000000.0;return value;
+   };
+   bool metadata=classes.Values.Any(x=>x==12);
+   int selected;
+   if(metadata)selected=indexes.OrderByDescending(score).ThenBy(x=>x).First();
+   else {var nonZero=indexes.Where(x=>(cpus.ContainsKey(x)&&cpus[x]>0)||(memories.ContainsKey(x)&&memories[x]>0)).ToList();selected=(nonZero.Count>0?nonZero:indexes).First();}
+   double nvalue;if(cpus.TryGetValue(selected,out nvalue))result.Cpu=nvalue;if(memories.TryGetValue(selected,out nvalue))result.Memory=nvalue;
+   try {var averages=session.Get(root+".33."+selected,root+".34."+selected);result.Cpu1Min=Percent(Read(averages,root+".33."+selected));result.Cpu5Min=Percent(Read(averages,root+".34."+selected));} catch {}
+   try {var identity=session.Get("1.3.6.1.2.1.47.1.1.1.1.7."+selected,"1.3.6.1.2.1.47.1.1.1.1.2."+selected);result.Entity=Str(identity,"1.3.6.1.2.1.47.1.1.1.1.7."+selected);if(string.IsNullOrWhiteSpace(result.Entity))result.Entity=Str(identity,"1.3.6.1.2.1.47.1.1.1.1.2."+selected);} catch {}
+   if(string.IsNullOrWhiteSpace(result.Entity))result.Entity="实体 "+selected;
+   return result;
+  }
+  static double? Percent(ISnmpData value) {double n;return SnmpSession.Valid(value)&&double.TryParse(value.ToString(),out n)&&n>=0&&n<=100?(double?)n:null;}
+  static bool IsHuawei(Snapshot s) {return (!string.IsNullOrEmpty(s.SysObjectId)&&s.SysObjectId.StartsWith("1.3.6.1.4.1.2011",StringComparison.Ordinal))||((s.Description??"").IndexOf("Huawei",StringComparison.OrdinalIgnoreCase)>=0)||((s.Description??"").IndexOf("HUAWEI",StringComparison.OrdinalIgnoreCase)>=0);}
+  static H3cResult HuaweiMetrics(SnmpSession session) {
+   const string cpu="1.3.6.1.4.1.2011.5.25.31.1.1.1.1.5", memory="1.3.6.1.4.1.2011.5.25.31.1.1.1.1.7";
+   var result=new H3cResult();var cpus=PercentColumn(session,cpu);var memories=PercentColumn(session,memory);var indexes=cpus.Keys.Concat(memories.Keys).Distinct().OrderBy(x=>x).ToList();if(indexes.Count==0)return result;
+   var classes=IntegerColumn(session,"1.3.6.1.2.1.47.1.1.1.1.5");
+   Func<int,double> score=index=>{double value=0;int n;if(classes.TryGetValue(index,out n)&&n==12)value+=500;if(cpus.ContainsKey(index))value+=50;if((cpus.ContainsKey(index)&&cpus[index]>0)||(memories.ContainsKey(index)&&memories[index]>0))value+=10;value-=index/1000000.0;return value;};
+   bool metadata=classes.Values.Any(x=>x==12);int selected;if(metadata)selected=indexes.OrderByDescending(score).ThenBy(x=>x).First();else {var nonZero=indexes.Where(x=>(cpus.ContainsKey(x)&&cpus[x]>0)||(memories.ContainsKey(x)&&memories[x]>0)).ToList();selected=(nonZero.Count>0?nonZero:indexes).First();}
+   double nvalue;if(cpus.TryGetValue(selected,out nvalue))result.Cpu=nvalue;if(memories.TryGetValue(selected,out nvalue))result.Memory=nvalue;
+   try {var identity=session.Get("1.3.6.1.2.1.47.1.1.1.1.7."+selected,"1.3.6.1.2.1.47.1.1.1.1.2."+selected);result.Entity=Str(identity,"1.3.6.1.2.1.47.1.1.1.1.7."+selected);if(string.IsNullOrWhiteSpace(result.Entity))result.Entity=Str(identity,"1.3.6.1.2.1.47.1.1.1.1.2."+selected);} catch {}
+   if(string.IsNullOrWhiteSpace(result.Entity))result.Entity="华为实体 "+selected;
+   return result;
+  }
+  static double? StandardCpu(SnmpSession session) {
+   var values=PercentColumn(session,"1.3.6.1.2.1.25.3.3.1.2");return values.Count>0?(double?)values.Values.Average():null;
+  }
+  static double? StandardMemory(SnmpSession session) {
    try {
-    var values=session.Walk(column,64).Values;
-    foreach(var v in values) { double n; if(SnmpSession.Valid(v)&&double.TryParse(v.ToString(),out n)&&n>=0&&n<=100)return n; }
+    const string sizeColumn="1.3.6.1.2.1.25.2.3.1.5", usedColumn="1.3.6.1.2.1.25.2.3.1.6", typeColumn="1.3.6.1.2.1.25.2.3.1.2";
+    var sizes=session.Walk(sizeColumn,512);var used=session.Walk(usedColumn,512);var types=session.Walk(typeColumn,512);
+    var ratios=new List<Tuple<int,double,bool>>();
+    foreach(var item in used) {
+     string suffix=item.Key.Substring(usedColumn.Length);ISnmpData size;
+     double u,s; if(!sizes.TryGetValue(sizeColumn+suffix,out size)||!SnmpSession.Valid(item.Value)||!SnmpSession.Valid(size)||!double.TryParse(item.Value.ToString(),out u)||!double.TryParse(size.ToString(),out s)||s<=0)continue;
+     string type;ISnmpData t;bool ram=types.TryGetValue(typeColumn+suffix,out t)&&SnmpSession.Valid(t)&&(type=t.ToString()).EndsWith(".2",StringComparison.Ordinal);
+     int index=Int32.MaxValue;var bits=suffix.Trim('.').Split('.');if(bits.Length>0)Int32.TryParse(bits[bits.Length-1],out index);
+     ratios.Add(Tuple.Create(index==0?Int32.MaxValue:index,Math.Max(0,Math.Min(100,u/s*100)),ram));
+    }
+    if(ratios.Count>0)return ratios.OrderByDescending(x=>x.Item3).ThenBy(x=>x.Item1).First().Item2;
    } catch {}
    return null;
   }
@@ -121,7 +195,7 @@ namespace NetWatch {
   }
   public static Snapshot Demo(Device d,Snapshot previous) {
    double phase=Clock.Now()/20000.0+(d.Type=="交换机"?1:d.Type=="路由器"?2:3);
-   var s=new Snapshot {Id=d.Id,Time=Clock.Now(),Status="online",Snmp=true,SysName=d.Name,Description="演示数据 · 不连接真实网络设备",UptimeTicks=(ulong)(8640000+Clock.Now()%8640000),Rtt=1.2+Math.Abs(Math.Sin(phase))*3,Loss=0,Cpu=24+Math.Sin(phase)*12,Memory=42+Math.Cos(phase)*4};
+   var s=new Snapshot {Id=d.Id,Time=Clock.Now(),Status="online",Snmp=true,SysName=d.Name,Description="演示数据 · 不连接真实网络设备",UptimeTicks=(ulong)(8640000+Clock.Now()%8640000),Rtt=1.2+Math.Abs(Math.Sin(phase))*3,Loss=0,Cpu=24+Math.Sin(phase)*12,Cpu1Min=23+Math.Sin(phase)*10,Cpu5Min=22+Math.Sin(phase)*8,Cpu5MinSource="设备 SNMP",Cpu5MinSamples=1,CpuTime=Clock.Now(),Memory=42+Math.Cos(phase)*4,MemorySource="演示数据",MemoryTime=Clock.Now(),MetricEntity="演示主控"};
    for(int i=1;i<=8;i++) {double input=(28+Math.Sin(phase+i)*18)*1000000,output=(18+Math.Cos(phase+i)*10)*1000000;var p=new InterfaceData {Index=i,Name="GE0/0/"+i,Alias=i==1?"上联口":(i>6?"备用":"接入端口"),Admin=i>6?2:1,Oper=i>6?2:1,Speed=1000000000,InBps=i>6?0:input,OutBps=i>6?0:output,InErrors=0,OutErrors=0,InDiscards=0,OutDiscards=0,Counter64=true};p.Utilization=Math.Max(p.InBps.Value,p.OutBps.Value)/p.Speed*100;s.Interfaces.Add(p);}
    Summarize(s);return s;
   }

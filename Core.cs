@@ -23,7 +23,7 @@ namespace NetWatch {
   public string CpuOid {get;set;}
   public string MemoryOid {get;set;}
   public Device() { Port=161; Enabled=true; Interval=60; Timeout=1500; Threshold=85; Type="交换机"; }
-  public object Public() { return new {Id,Name,Address,Type,Location,Port,Enabled,Demo,Interval,Timeout,Threshold,CpuOid,MemoryOid,HasCommunity=!string.IsNullOrEmpty(Secret)}; }
+  public object Public() { return new {Id,Name,Address,Type,Location,Port,Enabled,Demo,Interval,Timeout,Threshold,HasCommunity=!string.IsNullOrEmpty(Secret)}; }
  }
  public class InterfaceData {
   public int Index {get;set;}
@@ -53,19 +53,28 @@ namespace NetWatch {
   public double? InBps {get;set;}
   public double? OutBps {get;set;}
   public double? Cpu {get;set;}
+  public double? Cpu1Min {get;set;}
+  public double? Cpu5Min {get;set;}
+  public string Cpu5MinSource {get;set;}
+  public int Cpu5MinSamples {get;set;}
+  public long? CpuTime {get;set;}
   public double? Memory {get;set;}
+  public string MemorySource {get;set;}
+  public long? MemoryTime {get;set;}
+  public string MetricEntity {get;set;}
   public double? MaxUtilization {get;set;}
  }
  public class Snapshot : Sample {
   public string Id {get;set;}
   public string SysName {get;set;}
+  public string SysObjectId {get;set;}
   public string Description {get;set;}
   public string Error {get;set;}
   public ulong? UptimeTicks {get;set;}
   public bool Snmp {get;set;}
   public List<InterfaceData> Interfaces {get;set;}
   public Snapshot() { Status="pending"; Interfaces=new List<InterfaceData>(); }
-  public Sample Point() { return new Sample {Time=Time, Status=Status,Rtt=Rtt,Loss=Loss,InBps=InBps,OutBps=OutBps,Cpu=Cpu,Memory=Memory,MaxUtilization=MaxUtilization}; }
+  public Sample Point() { return new Sample {Time=Time, Status=Status,Rtt=Rtt,Loss=Loss,InBps=InBps,OutBps=OutBps,Cpu=Cpu,Cpu1Min=Cpu1Min,Cpu5Min=Cpu5Min,Cpu5MinSource=Cpu5MinSource,Cpu5MinSamples=Cpu5MinSamples,CpuTime=CpuTime,Memory=Memory,MemorySource=MemorySource,MemoryTime=MemoryTime,MetricEntity=MetricEntity,MaxUtilization=MaxUtilization}; }
  }
  public class Alert {
   public string Id {get;set;}
@@ -81,6 +90,29 @@ namespace NetWatch {
  public class StateFile {
   public List<Sample> History {get;set;}
   public Snapshot Current {get;set;}
+ }
+ public class TopologyPosition {
+  public double X {get;set;}
+  public double Y {get;set;}
+ }
+ public class DashboardTrendPoint {
+  public long Time {get;set;}
+  public double? InBps {get;set;}
+  public double? OutBps {get;set;}
+  public double? Cpu {get;set;}
+  public double? Memory {get;set;}
+ }
+ public class DashboardLinkRow {
+  public string DeviceId {get;set;}
+  public string DeviceName {get;set;}
+  public string Address {get;set;}
+  public string Interface {get;set;}
+  public int Admin {get;set;}
+  public int Oper {get;set;}
+  public double Speed {get;set;}
+  public double? InBps {get;set;}
+  public double? OutBps {get;set;}
+  public double? Utilization {get;set;}
  }
  public static class Json {
   public static string Encode(object value) { return new JavaScriptSerializer {MaxJsonLength=32*1024*1024,RecursionLimit=80}.Serialize(value); }

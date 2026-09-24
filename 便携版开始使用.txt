@@ -1,0 +1,17 @@
+NetWatch Windows v1.4.0 便携版
+
+1. 将整个压缩包解压到一个可写目录，例如 D:\NetWatch。
+2. 双击 Start-Portable.cmd 启动真实监测。
+3. 程序会自动打开浏览器，地址为本机局域网 IP，例如 http://192.168.1.20:18765/；同一局域网的其他电脑也可以访问。
+4. 需要演示功能时双击 Start-Demo.cmd，演示地址为本机局域网 IP 的 18767 端口。
+5. 退出时右键任务栏通知区域的 NetWatch 图标，选择“退出并停止监测”。
+
+请保持 NetWatch.exe、NetWatch.exe.config 和 SharpSnmpLib.dll 在同一目录，不要只单独运行 EXE。
+真实监测数据保存到当前目录的 Data 文件夹；演示数据保存到 DemoData 文件夹。
+网络拓扑节点拖动结束后会自动保存到 Data\topology.json；刷新、重启或其他局域网电脑访问都不会丢失布局。设备管理每页显示 10 台，可用页码或上一页/下一页翻页。
+拓扑页面会把所有节点自动安排在当前画布内；设备多时自动缩小并使用网格排列。点击“自动排列”可清除旧位置并重新适配屏幕。
+监控总览中的流量趋势、链路状态、CPU/内存趋势、告警和事件均来自程序实际采集与保存的数据。
+
+局域网访问说明：若其他电脑打不开，请在 Windows 防火墙中允许 NetWatch.exe 或 TCP 18765。此版本没有账户登录系统，只建议在可信的管理网络内开放。
+
+CPU/内存说明：不需要填写 OID。CPU 会自动识别 H3C 或华为主控实体；华为使用 `hwEntityCpuUsage`。内存优先采用 HOST-RESOURCES-MIB 系统 RAM 已用/总量比例，无法读取时再使用华为 `hwEntityMemUsage` 或 H3C 实体内存。首页显示内存来源、指标实体、采集时间和 CPU 5 分钟来源。解压新包后点击页面顶部“立即采集”；若仍为空，请在设备 SNMP 只读视图中放行 HUAWEI-ENTITY-EXTENT-MIB、ENTITY-EXT-MIB、ENTITY-MIB 或 HOST-RESOURCES-MIB。

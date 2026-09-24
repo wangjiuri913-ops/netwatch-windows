@@ -8,7 +8,7 @@ using System.Threading;
 namespace NetWatch {
  public sealed class Engine : IDisposable {
   readonly object gate=new object(); readonly Store store; readonly Collector collector=new Collector();
-  List<Device> devices; List<Alert> alerts;
+  List<Device> devices; List<Alert> alerts; Dictionary<string,TopologyPosition> topology;
   readonly Dictionary<string,Snapshot> current=new Dictionary<string,Snapshot>();
   readonly Dictionary<string,List<Sample>> histories=new Dictionary<string,List<Sample>>();
   readonly Dictionary<string,long> next=new Dictionary<string,long>();
@@ -16,33 +16,48 @@ namespace NetWatch {
   readonly HashSet<string> busy=new HashSet<string>();
   readonly System.Threading.Timer timer; bool stopped; public string StorageWarning="";
   public Engine(Store storage,bool start) {
-   store=storage;devices=store.Read("devices.json",new List<Device>());alerts=store.Read("alerts.json",new List<Alert>());
+   store=storage;devices=store.Read("devices.json",new List<Device>());alerts=store.Read("alerts.json",new List<Alert>());topology=store.Read("topology.json",new Dictionary<string,TopologyPosition>());
+   topology=topology.Where(x=>devices.Any(d=>d.Id==x.Key)&&ValidPosition(x.Value)).ToDictionary(x=>x.Key,x=>x.Value);
    foreach(var d in devices) {
     StateFile state=store.Read<StateFile>(d.Id+".json",null);
     if(state!=null) {if(state.Current!=null)current[d.Id]=state.Current;histories[d.Id]=(state.History??new List<Sample>()).Where(p=>p.Time>Clock.Now()-86400000).ToList();}
    }
    if(start) timer=new System.Threading.Timer(Tick,null,700,1000);
   }
-  static object Summary(Snapshot s) {return new {s.Id,s.Time,s.Status,s.Snmp,s.Rtt,s.Loss,s.InBps,s.OutBps,s.Cpu,s.Memory,s.MaxUtilization,PortCount=s.Interfaces.Count,UpPorts=s.Interfaces.Count(p=>p.Oper==1)};}
-  public object Dashboard() {lock(gate) {return new {Now=Clock.Now(),Warning=StorageWarning,Devices=devices.Select(d=>new {Config=d.Public(),Current=current.ContainsKey(d.Id)?Summary(current[d.Id]):null,Polling=busy.Contains(d.Id),Next=next.ContainsKey(d.Id)?next[d.Id]:0}).ToList(),Alerts=alerts.OrderByDescending(a=>a.Time).Take(250).ToList(),ActiveAlerts=alerts.Count(a=>!a.Resolved.HasValue),DataDirectory=store.Root};}}
+  static object Summary(Snapshot s) {return new {s.Id,s.Time,s.Status,s.Snmp,s.Rtt,s.Loss,s.InBps,s.OutBps,s.Cpu,s.Cpu1Min,s.Cpu5Min,s.Cpu5MinSource,s.Cpu5MinSamples,s.CpuTime,s.Memory,s.MemorySource,s.MemoryTime,s.MetricEntity,s.SysObjectId,s.Error,s.MaxUtilization,PortCount=s.Interfaces.Count,UpPorts=s.Interfaces.Count(p=>p.Oper==1)};}
+  List<DashboardTrendPoint> OverviewTrend() {
+   long cutoff=Clock.Now()-21600000;
+   var latest=histories.SelectMany(pair=>pair.Value.Where(p=>p.Time>=cutoff).Select(p=>new {DeviceId=pair.Key,Bucket=p.Time/300000,Point=p})).GroupBy(x=>new {x.DeviceId,x.Bucket}).Select(g=>g.OrderByDescending(x=>x.Point.Time).First()).ToList();
+   var result=latest.GroupBy(x=>x.Bucket).OrderBy(g=>g.Key).Select(g=>new DashboardTrendPoint {Time=g.Key*300000,InBps=g.Any(x=>x.Point.InBps.HasValue)?(double?)g.Where(x=>x.Point.InBps.HasValue).Sum(x=>x.Point.InBps.Value):null,OutBps=g.Any(x=>x.Point.OutBps.HasValue)?(double?)g.Where(x=>x.Point.OutBps.HasValue).Sum(x=>x.Point.OutBps.Value):null,Cpu=g.Any(x=>x.Point.Cpu.HasValue)?(double?)g.Where(x=>x.Point.Cpu.HasValue).Average(x=>x.Point.Cpu.Value):null,Memory=g.Any(x=>x.Point.Memory.HasValue)?(double?)g.Where(x=>x.Point.Memory.HasValue).Average(x=>x.Point.Memory.Value):null}).ToList();
+   return result.Count>48?result.Skip(result.Count-48).ToList():result;
+  }
+  List<DashboardLinkRow> LinkRows() {
+   var rows=new List<DashboardLinkRow>();
+   foreach(var item in current) {var d=devices.FirstOrDefault(x=>x.Id==item.Key);if(d==null)continue;foreach(var p in item.Value.Interfaces)rows.Add(new DashboardLinkRow {DeviceId=d.Id,DeviceName=d.Name,Address=d.Address,Interface=p.Name,Admin=p.Admin,Oper=p.Oper,Speed=p.Speed,InBps=p.InBps,OutBps=p.OutBps,Utilization=p.Utilization});}
+   return rows.OrderByDescending(x=>x.Oper==1).ThenByDescending(x=>x.Utilization??-1).ThenByDescending(x=>(x.InBps??0)+(x.OutBps??0)).Take(12).ToList();
+  }
+  public object Dashboard() {lock(gate) {return new {Now=Clock.Now(),Warning=StorageWarning,Devices=devices.Select(d=>new {Config=d.Public(),Current=current.ContainsKey(d.Id)?Summary(current[d.Id]):null,Polling=busy.Contains(d.Id),Next=next.ContainsKey(d.Id)?next[d.Id]:0}).ToList(),Alerts=alerts.OrderByDescending(a=>a.Time).Take(250).ToList(),ActiveAlerts=alerts.Count(a=>!a.Resolved.HasValue),Topology=topology.ToDictionary(x=>x.Key,x=>new {x=x.Value.X,y=x.Value.Y}),Trend=OverviewTrend(),Links=LinkRows(),DataDirectory=store.Root};}}
   public object Detail(string id) {lock(gate) {var d=Find(id);return new {Config=d.Public(),Current=current.ContainsKey(id)?current[id]:null,History=histories.ContainsKey(id)?histories[id].ToArray():new Sample[0]};}}
   public List<Sample> History(string id) {lock(gate) {Find(id);return histories.ContainsKey(id)?histories[id].ToList():new List<Sample>();}}
   Device Find(string id) {var d=devices.FirstOrDefault(x=>x.Id==id);if(d==null) throw new ArgumentException("设备不存在");return d;}
   static string Text(Dictionary<string,object> data,string key,string fallback) {object o;return data.TryGetValue(key,out o)&&o!=null?Convert.ToString(o):fallback;}
   static int Int(Dictionary<string,object> data,string key,int fallback,int low,int high) {int n;if(!int.TryParse(Text(data,key,fallback.ToString()),out n)||n<low||n>high)throw new ArgumentException(key+" 必须在 "+low+"–"+high+" 之间");return n;}
   static bool Bool(Dictionary<string,object> data,string key,bool fallback) {bool b;return bool.TryParse(Text(data,key,fallback.ToString()),out b)?b:fallback;}
+  static double Number(Dictionary<string,object> data,string key) {object value;double result;if(!data.TryGetValue(key,out value)||value==null||!double.TryParse(Convert.ToString(value,System.Globalization.CultureInfo.InvariantCulture),System.Globalization.NumberStyles.Float,System.Globalization.CultureInfo.InvariantCulture,out result)||double.IsNaN(result)||double.IsInfinity(result))throw new ArgumentException(key+" 必须是有效数字");return result;}
+  static bool ValidPosition(TopologyPosition position) {return position!=null&&!double.IsNaN(position.X)&&!double.IsInfinity(position.X)&&!double.IsNaN(position.Y)&&!double.IsInfinity(position.Y)&&position.X>=8&&position.X<=92&&position.Y>=10&&position.Y<=90;}
+  public object SaveTopology(Dictionary<string,object> data) {lock(gate) {string id=Text(data,"Id","");Find(id);var position=new TopologyPosition {X=Number(data,"X"),Y=Number(data,"Y")};if(!ValidPosition(position))throw new ArgumentException("拓扑坐标超出可用区域");topology[id]=position;store.Save("topology.json",topology);return new {Id=id,x=position.X,y=position.Y};}}
+  public void ResetTopology() {lock(gate) {topology=new Dictionary<string,TopologyPosition>();store.Save("topology.json",topology);}}
   public object Upsert(Dictionary<string,object> data) {
    lock(gate) {
     string id=Text(data,"Id","");var old=string.IsNullOrEmpty(id)?null:Find(id);
     if(old!=null&&old.Demo) throw new ArgumentException("演示设备不可编辑，请添加真实设备");
     if(old==null&&devices.Count>=100) throw new ArgumentException("本版本最多管理 100 台设备");
-    var d=new Device {Id=old==null?Guid.NewGuid().ToString("N"):old.Id,Name=Text(data,"Name","").Trim(),Address=Text(data,"Address","").Trim(),Type=Text(data,"Type","交换机"),Location=Text(data,"Location","").Trim(),Port=Int(data,"Port",161,1,65535),Interval=Int(data,"Interval",60,30,3600),Timeout=Int(data,"Timeout",1500,300,5000),Threshold=Int(data,"Threshold",85,1,100),Enabled=Bool(data,"Enabled",true),CpuOid=Text(data,"CpuOid","").Trim().TrimStart('.'),MemoryOid=Text(data,"MemoryOid","").Trim().TrimStart('.')};
+    var d=new Device {Id=old==null?Guid.NewGuid().ToString("N"):old.Id,Name=Text(data,"Name","").Trim(),Address=Text(data,"Address","").Trim(),Type=Text(data,"Type","交换机"),Location=Text(data,"Location","").Trim(),Port=Int(data,"Port",161,1,65535),Interval=Int(data,"Interval",60,30,3600),Timeout=Int(data,"Timeout",1500,300,5000),Threshold=Int(data,"Threshold",85,1,100),Enabled=Bool(data,"Enabled",true),CpuOid=Text(data,"CpuOid",old==null?"":old.CpuOid).Trim().TrimStart('.'),MemoryOid=Text(data,"MemoryOid",old==null?"":old.MemoryOid).Trim().TrimStart('.')};
     if(d.Name.Length<1||d.Name.Length>80||d.Location.Length>100) throw new ArgumentException("设备名称需为 1–80 字，位置最多 100 字");
     if(!new[]{"交换机","路由器","防火墙","其他"}.Contains(d.Type))throw new ArgumentException("设备类型无效");
     IPAddress address;if(!IPAddress.TryParse(d.Address,out address)||address.Equals(IPAddress.Any)||address.Equals(IPAddress.IPv6Any)||address.Equals(IPAddress.Broadcast)||address.IsIPv6Multicast||(address.AddressFamily==System.Net.Sockets.AddressFamily.InterNetwork&&address.GetAddressBytes()[0]>=224)) throw new ArgumentException("请填写有效的单台设备 IPv4/IPv6 地址，不接受网段或广播地址");
     d.Address=address.ToString();
     if(devices.Any(x=>x.Id!=d.Id&&!x.Demo&&x.Address==d.Address&&x.Port==d.Port))throw new ArgumentException("该 IP 和 SNMP 端口已存在");
-    foreach(string oid in new[]{d.CpuOid,d.MemoryOid}) if(oid.Length>200||(!string.IsNullOrEmpty(oid)&&!Regex.IsMatch(oid,@"^[0-2](\.[0-9]+){2,}$")))throw new ArgumentException("OID 必须是数字形式，标量请带实例 .0");
     string community=Text(data,"Community","");
     if(community.Length>128)throw new ArgumentException("社区字符串最多 128 字符");
     if(string.IsNullOrEmpty(community)) {if(old==null||string.IsNullOrEmpty(old.Secret))throw new ArgumentException("请填写 SNMP 只读社区字符串");d.Secret=old.Secret;}else d.Secret=Vault.Protect(community);
@@ -52,7 +67,7 @@ namespace NetWatch {
     PersistAlerts();return d.Public();
    }
   }
-  public void Delete(string id) {lock(gate) {Find(id);var updated=devices.Where(d=>d.Id!=id).ToList();store.Save("devices.json",updated);devices=updated;current.Remove(id);histories.Remove(id);next.Remove(id);failures.Remove(id);foreach(var a in alerts.Where(a=>a.DeviceId==id&&!a.Resolved.HasValue))a.Resolved=Clock.Now();PersistAlerts();}}
+  public void Delete(string id) {lock(gate) {Find(id);var updated=devices.Where(d=>d.Id!=id).ToList();store.Save("devices.json",updated);devices=updated;current.Remove(id);histories.Remove(id);next.Remove(id);failures.Remove(id);if(topology.Remove(id))store.Save("topology.json",topology);foreach(var a in alerts.Where(a=>a.DeviceId==id&&!a.Resolved.HasValue))a.Resolved=Clock.Now();PersistAlerts();}}
   public void Acknowledge(string id) {lock(gate) {var a=alerts.FirstOrDefault(x=>x.Id==id);if(a==null)throw new ArgumentException("告警不存在");a.Acknowledged=true;PersistAlerts();}}
   public void RequestPoll(string id) {lock(gate) {if(string.IsNullOrEmpty(id)){foreach(var d in devices)next[d.Id]=0;}else{Find(id);next[id]=0;}}Tick(null);}
   public void AddDemo() {lock(gate) {
@@ -81,10 +96,18 @@ namespace NetWatch {
    try {s=collector.Poll(d,old);}catch(Exception ex){store.Log("采集失败 "+d.Id+" "+ex.GetType().Name);s=new Snapshot {Id=d.Id,Time=Clock.Now(),Status="offline",Error="采集异常，请查看运行日志",Loss=100};}
    lock(gate) {
     busy.Remove(d.Id);if(stopped||!devices.Any(x=>object.ReferenceEquals(x,d)))return;
+    List<Sample> h;if(!histories.TryGetValue(d.Id,out h)){h=new List<Sample>();histories[d.Id]=h;}
+    ApplyMetricWindow(s,h);
     Evaluate(d,old,s);current[d.Id]=s;
-    List<Sample> h;if(!histories.TryGetValue(d.Id,out h)){h=new List<Sample>();histories[d.Id]=h;}h.Add(s.Point());h.RemoveAll(p=>p.Time<Clock.Now()-86400000);if(h.Count>2880)h.RemoveRange(0,h.Count-2880);
+    h.Add(s.Point());h.RemoveAll(p=>p.Time<Clock.Now()-86400000);if(h.Count>2880)h.RemoveRange(0,h.Count-2880);
     try {store.Save(d.Id+".json",new StateFile {Current=s,History=h});PersistAlerts();StorageWarning="";}catch(Exception ex){StorageWarning="数据保存失败，请检查磁盘可用空间和目录权限";store.Log(StorageWarning+" "+ex.GetType().Name);}
    }
+  }
+  static void ApplyMetricWindow(Snapshot s,List<Sample> history) {
+   if(!s.Cpu.HasValue){if(!s.Cpu5Min.HasValue)s.Cpu5Min=null;s.Cpu5MinSamples=0;return;}
+   var values=history.Where(p=>p.Time>=s.Time-300000&&p.Time<=s.Time&&p.Cpu.HasValue).Select(p=>p.Cpu.Value).ToList();
+   values.Add(s.Cpu.Value);s.Cpu5MinSamples=values.Count;
+   if(!s.Cpu5Min.HasValue){s.Cpu5Min=values.Average();s.Cpu5MinSource="平台采样均值";}
   }
   void Evaluate(Device d,Snapshot old,Snapshot s) {
    int fail;failures.TryGetValue(d.Id,out fail);fail=s.Snmp?0:fail+1;failures[d.Id]=fail;
